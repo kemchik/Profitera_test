@@ -1,53 +1,157 @@
-require 'open-uri'
 require 'nokogiri'
 require 'csv'
+require 'curb'
 
- data = [] #result data
 
-# get information from product page
-def getInfoFromPage (url)
-  html_page = open(url)
-  doc_page = Nokogiri::HTML(html_page)
-  title = doc_page.css('.nombre_fabricante_bloque h1').text.strip
-  image = doc_page.css('#bigpic')[0].attr('src').chop
-  price = doc_page.css('.price_comb').text.chop
-  info = {
-      'title': title,
-      'image': image,
-      'price': price
-  }
-
-  return info
+class Logger
+ def info(message)
+  puts "Message: #{message}"
+ end
 end
 
-# for first page
-html = open('https://www.petsonic.com/snacks-huesos-para-perros/?p=' + 1.to_s)
-first_doc = Nokogiri::HTML(html)
+class File
+ def initialize
+  @logger = Logger.new
+ end
 
-first_doc.css('.ajax_block_product').each do |product|
-  link = product.css('.product_img_link')[0].attr('href')
-  data.push(getInfoFromPage(link))
-end
+ def save_to_file_csv(data, number, file_name)
+  logger.info "Write down information about the product #{number} to the file #{file_name}"
 
-# for other pages
-page_number = 2
-
-begin
-  html = open('https://www.petsonic.com/snacks-huesos-para-perros/?p=' + page_number.to_s)
-  doc = Nokogiri::HTML(html)
-
-  if  doc.css('.ajax_block_product') !=  first_doc.css('.ajax_block_product') #if it's new page
-    doc.css('.ajax_block_product').each do |product|
-      link = product.css('.product_img_link')[0].attr('href')
-      data.push(getInfoFromPage(link))
-    end
-    page_number += 1
+  CSV.open(file_name, 'wb') do |csv|
+   data.each do |item|
+    csv << "name: #{item[:name]} image: #{item[:image]} prices: #{item[:price]}"
+   end
   end
-end while page_number < 11
+ end
 
-# save result to file
-CSV.open('info.csv', 'wb') do |csv|
+ private
+
+ attr_reader :logger
+end
+
+class Parser
+ ALL_PAGINATION_BOTTOMS_SPANS = "//*[@id='pagination_bottom']/ul/li/a/span"
+ All_LI_IN_PRODUCT_LIST = "//ul[@id='product_list']//li"
+ ALL_HREFS_ON_PRODUCT = "//a[@class='product-name']/@href"
+
+ def initialize
+  @logger = Logger.new
+  @product = Product.new
+  @file = File.new
+ end
+
+ def get_page(url, number)
+  logger.info "Download page #{number}"
+  http = Curl.get(url)
+  product_p = http.body_str
+  product_page = Nokogiri::HTML(product_p)
+  return product_page
+ end
+
+ def get_number_of_pages(page)
+  page_span = page.xpath(ALL_PAGINATION_BOTTOMS_SPANS)
+  number_of_pages = page_span[page_span.size - 2].text.to_i
+  return number_of_pages
+ end
+
+ def set_url_and_filename
+  logger.info "Enter category link"
+  @url = gets.chomp.strip.to_s
+  # @url = 'https://www.petsonic.com/snacks-huesos-para-perros/'
+  logger.info "Enter file name"
+  @file_name = "#{gets.chop.to_s}.csv"
+  # @file_name = 'infor.csv'
+ end
+
+ def get_information_about_every_product(page)
+  amount_of_product = page.xpath(All_LI_IN_PRODUCT_LIST).size
+  amount_of_product.times do |link|
+   link_product = page.xpath(ALL_HREFS_ON_PRODUCT)[link].to_s
+   data = product.get_information_from_product_page(link_product, link + 1)
+   # file.save_to_file_csv(data, link + 1, @file_name)
+  end
+ end
+
+ def get_information_about_category
+  set_url_and_filename
+  page = get_page(@url, '')
+  data = []
+
+  for number in 1..get_number_of_pages(page) + 1
+   page = get_page(@url + '?p=' + number.to_s, number)
+   get_information_about_every_product(page)
+  end
+
+  console.log(data)
+  logger.info "The End!"
+ end
+
+ private
+
+ attr_reader :logger, :product, :file
+end
+
+class Product
+ ALL_LI_WITH_WEIGHT = "//ul[@class='attribute_radio_list']/li"
+ H1_PRODUCT_NAME = "//h1[@class='product_main_name']/text()"
+ SRS_ON_IMAGE = "//img[@id='bigpic']/@src"
+ ALL_PRODUCT_PRICES = "//span[@class='price_comb']"
+ ALL_PRODUCT_WEIGHT = "//span[@class='radio_label']/text()"
+
+ def initialize
+  @logger = Logger.new
+ end
+
+ def get_information_from_product_page(url, number)
+  page = get_page(url, number)
+  elements = get_elements(page)
+  return elements
+ end
+
+ def get_page(url, number)
+  logger.info "Download product page #{number}"
+  http = Curl.get(url)
+  product_p = http.body_str
+  product_page = Nokogiri::HTML(product_p)
+  return product_page
+ end
+
+ def get_elements(page)
+  products = []
+  number_of_weights = page.xpath(ALL_LI_WITH_WEIGHT).size
+  product_name = page.xpath(H1_PRODUCT_NAME).text.strip
+  image_link = page.xpath(SRS_ON_IMAGE).text.strip.to_s
+
+  data = get_each_weight_and_price(page, number_of_weights)
   data.each do |item|
-    csv << ['title: ' + item[:title], 'image: ' + item[:image], 'prices: ' + item[:price]]
+   products.push(
+       name: "#{product_name} - #{item[:weight]}",
+       price: item[:price],
+       image: image_link,
+       )
   end
+  return products
+ end
+
+ def get_each_weight_and_price(page, number_el_product)
+  weight_and_prices = []
+  number_el_product.times do |number|
+   product_weight = page.xpath(ALL_PRODUCT_WEIGHT)[number].text.strip
+   product_price = page.xpath(ALL_PRODUCT_PRICES)[number].text.strip
+   weight = " #{product_weight} "
+   weight_and_prices.push(
+       weight: weight,
+       price: product_price,
+       )
+  end
+
+  return weight_and_prices
+ end
+
+ private
+
+ attr_reader :logger
 end
+
+
+Parser.new.get_information_about_category
